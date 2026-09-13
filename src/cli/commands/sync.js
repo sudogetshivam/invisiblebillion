@@ -21,7 +21,7 @@ async function syncCommand() {
             console.log(`      when those peers appear. (This is Epidemic Routing)\n`);
         } else if (res.deliverable > 0) {
             console.log(`\n   📤 Delivery in progress — check status with:`);
-            console.log(`      pollen status <messageId>\n`);
+            console.log(`      ib status <messageId>\n`);
         } else {
             console.log(`\n   ✅ No pending messages.\n`);
         }

@@ -1,12 +1,12 @@
 'use strict';
 
 /**
- * Pollen Daemon — background process entry point.
+ * The Invisible Billion Daemon — background process entry point.
  *
- * Spawned by `pollen start` with:
+ * Spawned by `ib start` with:
  *   child_process.spawn('node', [__filename], { detached: true, stdio: 'ignore', windowsHide: true })
  *
- * All logging goes to ~/.pollen/daemon.log.
+ * All logging goes to ~/.ib/daemon.log.
  * Never reads from stdin.
  */
 
@@ -16,10 +16,10 @@ const net = require('net');
 const os = require('os');
 
 //  Redirect console to log file
-const POLLEN_DIR = path.join(os.homedir(), '.pollen');
-if (!fs.existsSync(POLLEN_DIR)) fs.mkdirSync(POLLEN_DIR, { recursive: true });
+const IB_DIR = path.join(os.homedir(), '.ib');
+if (!fs.existsSync(IB_DIR)) fs.mkdirSync(IB_DIR, { recursive: true });
 
-const LOG_FILE = path.join(POLLEN_DIR, 'daemon.log');
+const LOG_FILE = path.join(IB_DIR, 'daemon.log');
 const logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
 
 function log(...args) {
@@ -61,12 +61,12 @@ const { startTCP, sendMessage } = require('./tcp');
 const { forwardMessages, sendAck } = require('./epidemic');
 
 // ── Constants ──────────────────────────────────────────────────────────────────
-const PID_FILE = path.join(POLLEN_DIR, 'daemon.pid');
+const PID_FILE = path.join(IB_DIR, 'daemon.pid');
 const IPC_SOCKET = getIPCPath();
 
 function getIPCPath() {
-    if (process.platform === 'win32') return '\\\\.\\pipe\\pollen-ipc';
-    return path.join(POLLEN_DIR, 'daemon.sock');
+    if (process.platform === 'win32') return '\\\\.\\pipe\\ib-ipc';
+    return path.join(IB_DIR, 'daemon.sock');
 }
 
 // ── Write PID ─────────────────────────────────────────────────────────────────
@@ -204,7 +204,7 @@ function handleIncomingMessage(message, remoteIP, isRelay = false) {
             log(`[deliver] ✅ Message delivered! From: ${message.from_identity} | Content: "${plaintext}"`);
 
             // Append to inbox file for easy reading
-            const inboxFile = path.join(POLLEN_DIR, 'inbox.log');
+            const inboxFile = path.join(IB_DIR, 'inbox.log');
             const entry = `[${new Date().toISOString()}] From: ${message.from_identity}\n${plaintext}\n---\n`;
             fs.appendFileSync(inboxFile, entry, 'utf8');
 
@@ -354,16 +354,19 @@ const stopTCP = startTCP({
 
 // ── Network change watcher ────────────────────────────────────────────────────
 const stopNetworkWatcher = startNetworkWatcher((newIP, previousIP) => {
-    log(`[network] Changed: ${previousIP} → ${newIP}. Re-announcing and sweeping pending...`);
-    broadcastNow();
-    startupDeliverySweep(); // re-try all pending to known peers on new network
+    log(`[network] Changed: ${previousIP} → ${newIP}. Clearing stale peer IPs and re-announcing...`);
 
-    // Phase 4: Trigger bundle exchange of all pending messages with recently active peers
-    const peerIPs = getActivePeers().map(p => p.ip).filter(ip => ip);
-    if (peerIPs.length > 0) {
-        log(`[epidemic] Network change triggered bundle exchange with ${peerIPs.length} peer(s)`);
-        forwardMessages(peerIPs);
-    }
+    // Critical: clear all peer IPs from the OLD network.
+    // Peers from the previous network are unreachable now.
+    // They will re-announce via UDP within 15s if they are also on the new network.
+    clearAllPeerIPs();
+    log('[network] Stale peer IPs cleared — waiting for fresh UDP announcements on new network.');
+
+    // Re-announce ourselves on the new network immediately
+    broadcastNow();
+
+    // Retry delivery sweep — any peers that re-appear will be handled by onPeer callback
+    startupDeliverySweep();
 });
 
 // ── Phase 3: Startup / network-change delivery sweep ─────────────────────────
@@ -436,15 +439,36 @@ setInterval(() => {
 }, RETRY_SWEEP_INTERVAL_MS).unref();
 
 // ── Periodic stale peer cleanup ───────────────────────────────────────────────
-// Every 60 s, remove peers not seen in 3 minutes (12+ missed 15s heartbeats).
-const STALE_PEER_INTERVAL_MS = 60_000;
-const STALE_PEER_THRESHOLD_MS = 3 * 60 * 1000;
+// Every 20 s, remove peers not seen in 45 s (3 missed 15s heartbeats).
+// This ensures scan reflects reality quickly when a peer disconnects without
+// sending a goodbye packet (e.g. closes laptop, loses WiFi).
+const STALE_PEER_INTERVAL_MS = 20_000;
+const STALE_PEER_THRESHOLD_MS = 45_000; // 3 missed heartbeats
 setInterval(() => {
     const removed = removeInactivePeers(STALE_PEER_THRESHOLD_MS);
     if (removed > 0) {
-        log(`[cleanup] Removed ${removed} stale peer(s) (not seen in 3 min)`);
+        log(`[cleanup] Removed ${removed} stale peer(s) (not seen in 45s)`);
     }
 }, STALE_PEER_INTERVAL_MS).unref();
+
+// ── Periodic epidemic forwarding sweep ────────────────────────────────────────
+// Every 45 s, push ALL pending messages to ALL currently active peers.
+// This catches the case where a carrier was already on the network when a
+// new message arrived and their onPeer event already fired — they wouldn't
+// get the new message unless we periodically push to them.
+const EPIDEMIC_SWEEP_INTERVAL_MS = 45_000;
+setInterval(() => {
+    const pending = getAllPending();
+    if (pending.length === 0) return;
+
+    const peerIPs = getActivePeers().map(p => p.ip).filter(ip => ip);
+    if (peerIPs.length === 0) return;
+
+    log(`[epidemic] Periodic sweep: pushing ${pending.length} pending msg(s) to ${peerIPs.length} active peer(s)`);
+    forwardMessages(peerIPs).catch(err => {
+        log(`[epidemic] Periodic sweep failed: ${err.message}`);
+    });
+}, EPIDEMIC_SWEEP_INTERVAL_MS).unref();
 
 // ── IPC Server ────────────────────────────────────────────────────────────────
 if (process.platform !== 'win32' && fs.existsSync(IPC_SOCKET)) {
@@ -500,8 +524,8 @@ function handleCommand(cmd, socket) {
             break;
 
         case 'scan': {
-            // Return only peers seen within the last 2 minutes (recent heartbeat)
-            const SCAN_FRESHNESS_MS = 2 * 60 * 1000;
+            // Return only peers seen within the last 90 s (consistent with cleanup threshold)
+            const SCAN_FRESHNESS_MS = 90_000;
             const peers = getAllPeers(SCAN_FRESHNESS_MS);
             sendResponse(socket, { ok: true, peers });
             break;

@@ -14,13 +14,13 @@ const net = require('net');
 const path = require('path');
 const os = require('os');
 
-const POLLEN_DIR = path.join(os.homedir(), '.pollen');
+const IB_DIR = path.join(os.homedir(), '.ib');
 
 function getIPCPath() {
     if (process.platform === 'win32') {
-        return '\\\\.\\pipe\\pollen-ipc'; //Windows uses named pipes.
+        return '\\\\.\\pipe\\ib-ipc'; //Windows uses named pipes.
     }
-    return path.join(POLLEN_DIR, 'daemon.sock'); //Unix socket for Linux/macOS.
+    return path.join(IB_DIR, 'daemon.sock'); //Unix socket for Linux/macOS.
 }
 
 const IPC_SOCKET = getIPCPath();
@@ -101,9 +101,9 @@ async function runCommand(command, formatter) {
         formatter(response);
     } catch (err) {
         if (err.message === 'DAEMON_NOT_RUNNING') {
-            console.error('❌ Daemon is not running. Start it with: pollen start');
+            console.error('❌ Daemon is not running. Start it with: ib start');
         } else if (err.message === 'TIMEOUT') {
-            console.error('❌ Daemon is not responding (timeout). Try: pollen stop && pollen start');
+            console.error('❌ Daemon is not responding (timeout). Try: ib stop && ib start');
         } else {
             console.error('❌ IPC error:', err.message);
         }

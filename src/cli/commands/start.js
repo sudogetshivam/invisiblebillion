@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * pollen start — Start the background daemon.
+ * ib start — Start the background daemon.
  *
  * Handles:
  *  1. First-time identity + keypair setup (interactive)
@@ -21,8 +21,8 @@ const { loadOrCreate } = require('../../identity/index');
 const { loadOrCreateKeypair } = require('../../crypto/keys');
 const { isDaemonRunning } = require('../ipc');
 
-const POLLEN_DIR = path.join(os.homedir(), '.pollen');
-const PID_FILE = path.join(POLLEN_DIR, 'daemon.pid');
+const IB_DIR = path.join(os.homedir(), '.ib');
+const PID_FILE = path.join(IB_DIR, 'daemon.pid');
 const DAEMON_ENTRY = path.resolve(__dirname, '../../daemon/index.js');
 
 /**
@@ -89,7 +89,7 @@ async function startCommand() {
     if (!wasStale && fs.existsSync(PID_FILE)) {
         // PID file exists and process is alive → already running
         if (await isDaemonRunning()) {
-            console.log(`✅ Pollen daemon is already running as ${identity.identity}`);
+            console.log(`✅ The Invisible Billion daemon is already running as ${identity.identity}`);
             return;
         }
         // PID alive but IPC not responding — force clean and restart
@@ -105,20 +105,20 @@ async function startCommand() {
     });
     child.unref(); // Allow CLI to exit immediately
 
-    console.log(`🌿 Starting Pollen daemon... (PID will be ${child.pid})`);
+    console.log(`🌍 Starting The Invisible Billion daemon... (PID will be ${child.pid})`);
 
     // ── 5. Wait for IPC ready ─────────────────────────────────────────────────
     const ready = await waitForDaemon(4000);
 
     if (ready) {
-        console.log(`\n✅ Pollen daemon is running!`);
+        console.log(`\n✅ The Invisible Billion daemon is running!`);
         console.log(`   Your identity: ${identity.identity}`);
-        console.log(`   Log: ~/.pollen/daemon.log`);
-        console.log(`   Stop: pollen stop\n`);
+        console.log(`   Log: ~/.ib/daemon.log`);
+        console.log(`   Stop: ib stop\n`);
     } else {
         console.error(
             '\n⚠️  Daemon spawned but IPC is not responding yet.\n' +
-            '   It may still be starting up — check ~/.pollen/daemon.log for details.'
+            '   It may still be starting up — check ~/.ib/daemon.log for details.'
         );
     }
 }

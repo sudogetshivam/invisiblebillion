@@ -5,7 +5,7 @@ const { openDb } = require('./index');
 /**
  * Delete all messages that have expired (ttl < now) and are not delivered.
  * Delivered messages are kept as a record so senders can still check
- * pollen status <id>. They are cleaned up after 30 days.
+ * ib status <id>. They are cleaned up after 30 days.
  * Also clean up peers that haven't been seen in 1 hour, to prevent stale peer entries.
  */
 function cleanExpired() {

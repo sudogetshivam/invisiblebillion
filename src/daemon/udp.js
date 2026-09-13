@@ -14,10 +14,10 @@ const os = require('os');
 
 const UDP_PORT = 41234;
 const BROADCAST_INTERVAL_MS = 15_000; // brodcast every 15 seconds as heartbeat, to notify peers of our presence and IP changes
-const ANNOUNCE_TYPE = 'pollen-announce'; // announces our presence and public key to peers on the LAN, wether new or existing peers, so they can connect to us via TCP or UDP direct message delivery
-const GOODBYE_TYPE = 'pollen-goodbye'; //send when we are leaving, so peers can immediately know we are leaving and remove us from their peer list, instead of waiting for a timeout to detect our absence
-const DELIVER_TYPE = 'pollen-deliver'; //used for direct message delivery via UDP unicast, when TCP is blocked by firewall, so we can still deliver messages to peers on the same LAN without relying on TCP, but with best effort delivery (no retries, no ordering guarantees)
-const RELAY_TYPE = 'pollen-relay'; //used for epidemic routing
+const ANNOUNCE_TYPE = 'ib-announce'; // announces our presence and public key to peers on the LAN, wether new or existing peers, so they can connect to us via TCP or UDP direct message delivery
+const GOODBYE_TYPE = 'ib-goodbye'; //send when we are leaving, so peers can immediately know we are leaving and remove us from their peer list, instead of waiting for a timeout to detect our absence
+const DELIVER_TYPE = 'ib-deliver'; //used for direct message delivery via UDP unicast, when TCP is blocked by firewall, so we can still deliver messages to peers on the same LAN without relying on TCP, but with best effort delivery (no retries, no ordering guarantees)
+const RELAY_TYPE = 'ib-relay'; //used for epidemic routing
 
 // Max safe UDP payload size, because headers also need space 
 const MAX_UDP_PAYLOAD = 60000;
@@ -55,7 +55,7 @@ function getBroadcastAddresses() {
 /**
  * Send a UDP broadcast announce on all LAN interfaces.
  * Goal: Tell every device on the LAN:
- * I am a Pollen node. Here is my identity and public key.
+ * I am an IB node. Here is my identity and public key.
  */
 function sendBroadcast() {
     if (!_socket || !_myIdentity || !_myPublicKey) return; //all are compulsory for broadcast
@@ -157,7 +157,7 @@ function startUDP({ identity, publicKey, onPeer, onPeerGoodbye, onMessage }) {
     _myIdentity = identity;
     _myPublicKey = publicKey;
 
-    //opens a UDP socket for IPv4 with address reuse enabled (allows multiple processes to bind to the same port, useful for multiple Pollen instances on the same LAN)
+    //opens a UDP socket for IPv4 with address reuse enabled (allows multiple processes to bind to the same port, useful for multiple IB instances on the same LAN)
     _socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
 
     _socket.on('error', (err) => {
