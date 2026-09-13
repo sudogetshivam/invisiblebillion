@@ -7,18 +7,20 @@ const TCP_PORT = 41235;
 const CONNECT_TIMEOUT_MS = 2000; //wait 2second for peers to respond to TCP connection attempts
 const SEND_TIMEOUT_MS = 8000;   
 
-let _server = null;
-let _identity = null;
+let _server     = null;
+let _identity   = null;
 let _privateKey = null;
-let _onMessage = null;
+let _onMessage  = null;
+let _onRoutingTable = null; // callback(fromIdentity, table) for routing-table exchange
 
 
-function startTCP({ identity, privateKey, onMessage }) {
+function startTCP({ identity, privateKey, onMessage, onRoutingTable }) {
     if (_server) return () => stopTCP();
 
-    _identity = identity;
-    _privateKey = privateKey;
-    _onMessage = onMessage;
+    _identity       = identity;
+    _privateKey     = privateKey;
+    _onMessage      = onMessage;
+    _onRoutingTable = onRoutingTable || null;
 
     _server = net.createServer((socket) => {
         handleIncomingConnection(socket); //creates tcp server and listens for incoming connections, this function will read message frame, parse JSON, process message
@@ -104,6 +106,21 @@ function processFrame(frame, socket, remoteIP) {
             socket.write(JSON.stringify({ type: 'ack', messageId: message.id, ok: true }) + '\n');
         } catch (err) {
             socket.write(JSON.stringify({ type: 'ack', messageId: message.id, ok: false, error: err.message }) + '\n');
+        }
+    } else if (type === 'rt-exchange') {
+        // Routing table from a peer for PRoPHET transitivity update.
+        // frame.message contains: { fromIdentity: string, table: Array }
+        const { fromIdentity, table } = message;
+        if (fromIdentity && Array.isArray(table)) {
+            try {
+                if (_onRoutingTable) _onRoutingTable(fromIdentity, table);
+                socket.write(JSON.stringify({ type: 'ack', ok: true }) + '\n');
+            } catch (err) {
+                console.error('[tcp] onRoutingTable handler error:', err.message);
+                socket.write(JSON.stringify({ type: 'ack', ok: false, error: err.message }) + '\n');
+            }
+        } else {
+            socket.write(JSON.stringify({ type: 'ack', ok: false, error: 'Malformed rt-exchange frame' }) + '\n');
         }
     } else {
         socket.write(JSON.stringify({ type: 'ack', ok: false, error: `Unknown frame type: ${type}` }) + '\n');

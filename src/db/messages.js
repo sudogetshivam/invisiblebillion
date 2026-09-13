@@ -189,6 +189,16 @@ function clearAllPeerIPs() {
 function removeInactivePeers(olderThanMs) {
     const db = openDb();
     const cutoff = Date.now() - olderThanMs;
+    // Nullify IP so they are considered offline, but retain public_key and identity
+    return db.prepare('UPDATE peers SET ip = NULL WHERE last_seen < ? AND ip IS NOT NULL').run(cutoff).changes;
+}
+
+/**
+ * Permanently delete peer records that have not been seen for over 7 days.
+ */
+function purgeOldPeers(olderThanMs = 7 * 24 * 60 * 60 * 1000) {
+    const db = openDb();
+    const cutoff = Date.now() - olderThanMs;
     return db.prepare('DELETE FROM peers WHERE last_seen < ?').run(cutoff).changes;
 }
 
@@ -210,4 +220,5 @@ module.exports = {
     markPeerOffline,
     clearAllPeerIPs,
     removeInactivePeers,
+    purgeOldPeers,
 };

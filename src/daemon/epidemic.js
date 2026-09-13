@@ -11,41 +11,73 @@ function log(msg) {
 }
 
 /**
- * Forward all pending messages to a list of peer IPs.
- * Tries TCP first, falls back to UDP if TCP fails (firewall blocking).
- * @param {string[]} peerIPs - List of peer IP addresses
+ * Forward pending messages to a list of peers using engine-gated PRoPHET routing.
+ *
+ * When an AdaptiveRoutingEngine is provided, each (peer, message) pair is
+ * evaluated with engine.shouldForwardMessage() before transmitting:
+ *   • If the peer is a better carrier than us → send relay
+ *   • Otherwise → skip (reduces unnecessary traffic)
+ *   • If engine is absent → fall back to pure epidemic (forward to all)
+ *
+ * @param {Array<{identity: string, ip: string} | string>} peers
+ *   Array of peer objects with identity+ip, OR bare IP strings (legacy mode).
+ * @param {AdaptiveRoutingEngine|null} [engine]
+ *   The routing engine for forwarding decisions. Pass null for pure epidemic.
  */
-function forwardMessages(peerIPs) {
-    if (!peerIPs || peerIPs.length === 0) return Promise.resolve();
+function forwardMessages(peers, engine = null) {
+    if (!peers || peers.length === 0) return Promise.resolve();
 
     // getAllPending already filters by hop_count < 20 and TTL
     const pending = getAllPending();
     if (pending.length === 0) return Promise.resolve();
 
-    log(`[epidemic] Forwarding ${pending.length} message(s) to ${peerIPs.length} peer(s)`);
+    // Normalise: accept both bare IP strings (legacy) and { identity, ip } objects
+    const normalisedPeers = peers.map(p =>
+        typeof p === 'string' ? { identity: null, ip: p } : p
+    );
+
+    log(`[epidemic] Routing ${pending.length} msg(s) to ${normalisedPeers.length} peer(s) [engine=${engine ? 'ON' : 'OFF'}]`);
 
     const promises = [];
-    for (const ip of peerIPs) {
+    for (const peer of normalisedPeers) {
         for (const msg of pending) {
+
+            // Never bounce message back to original sender
+            if (peer.identity && msg.from_identity === peer.identity) {
+                continue;
+            }
+
+            // ── Engine-gated forwarding decision ──────────────────────────────
+            // If we have an engine and a peer identity, evaluate carrier suitability.
+            if (engine && peer.identity) {
+                const shouldRelay = engine.shouldForwardMessage(msg.destination, peer.identity, {
+                    hop_count: msg.hop_count,
+                    ttl: msg.ttl,
+                });
+                if (!shouldRelay) {
+                    log(`[epidemic] Skipping ${msg.id} → ${peer.identity} (not an eligible carrier)`);
+                    continue;
+                }
+            }
+
             const relayPayload = {
-                id: msg.id,
+                id:            msg.id,
                 from_identity: msg.from_identity,
-                destination: msg.destination,
-                payload: msg.payload,     // Opaque encrypted blob
-                hop_count: msg.hop_count, // Receiver will increment this
-                ttl: msg.ttl,
-                created_at: msg.created_at,
+                destination:   msg.destination,
+                payload:       msg.payload,     // opaque encrypted blob
+                hop_count:     msg.hop_count,   // receiver will increment
+                ttl:           msg.ttl,
+                created_at:    msg.created_at,
             };
 
-            // Try TCP first, fallback to UDP if TCP fails
-            const relayPromise = sendMessage(ip, 'relay', relayPayload)
-                .catch(tcpErr => {
-                    // TCP failed — try UDP fallback (works through firewalls)
-                    return sendDirectMessage(ip, 'relay', relayPayload)
-                        .catch(udpErr => {
-                            log(`[epidemic] Failed to relay ${msg.id} to ${ip} (TCP+UDP both failed)`);
-                        });
-                });
+            // Try TCP first, fall back to UDP if TCP fails (firewall blocking)
+            const relayPromise = sendMessage(peer.ip, 'relay', relayPayload)
+                .catch(() =>
+                    sendDirectMessage(peer.ip, 'relay', relayPayload)
+                        .catch(() => {
+                            log(`[epidemic] Failed to relay ${msg.id} to ${peer.ip} (TCP+UDP both failed)`);
+                        })
+                );
 
             promises.push(relayPromise);
         }

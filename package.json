@@ -1,6 +1,6 @@
 {
   "name": "the-invisible-billion-cli",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "description": "Fully offline, zero-internet, peer-to-peer epidemic routing CLI messenger — The Invisible Billion",
   "main": "src/daemon/index.js",
   "bin": {
