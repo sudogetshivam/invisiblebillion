@@ -1,13 +1,13 @@
 {
-  "name": "pollen-transmit",
-  "version": "1.0.2",
-  "description": "Fully offline, zero-internet, peer-to-peer epidemic routing CLI messenger",
+  "name": "the-invisible-billion-cli",
+  "version": "1.0.1",
+  "description": "Fully offline, zero-internet, peer-to-peer epidemic routing CLI messenger — The Invisible Billion",
   "main": "src/daemon/index.js",
   "bin": {
-    "pollen": "bin/pollen.js"
+    "ib": "bin/ib.js"
   },
   "scripts": {
-    "start": "node bin/pollen.js start"
+    "start": "node bin/ib.js start"
   },
   "dependencies": {
     "better-sqlite3": "^12.6.2",

@@ -7,7 +7,7 @@ const { loadIdentity } = require('../../identity/index');
 const { loadOrCreateKeypair } = require('../../crypto/keys');
 
 /**
- * pollen send <destination> "<message>"
+ * ib send <destination> "<message>"
  *
  *  1. Validate identity format
  *  2. Ask daemon for recipient's public key via get-peer-key IPC
@@ -17,8 +17,8 @@ const { loadOrCreateKeypair } = require('../../crypto/keys');
  */
 async function sendCommand_(destination, messageText) {
     if (!destination || !messageText) {
-        console.error('Usage: pollen send <identity> "<message>"');
-        console.error('Example: pollen send raj@a3f2 "bhai notes bhej"');
+        console.error('Usage: ib send <identity> "<message>"');
+        console.error('Example: ib send raj@a3f2 "bhai notes bhej"');
         process.exit(1);
     }
 
@@ -34,7 +34,7 @@ async function sendCommand_(destination, messageText) {
     try {
         senderIdentity = loadIdentity().identity;
     } catch {
-        console.error('❌ Not initialised. Run: pollen start');
+        console.error('❌ Not initialised. Run: ib start');
         process.exit(1);
     }
 
@@ -55,7 +55,7 @@ async function sendCommand_(destination, messageText) {
             }
         } catch {
             // Daemon may be unreachable — handled below
-            console.error('❌ Daemon is not running. Start it with: pollen start');
+            console.error('❌ Daemon is not running. Start it with: ib start');
             process.exit(1);
         }
     }
@@ -105,7 +105,7 @@ async function sendCommand_(destination, messageText) {
             console.log(`   Message:   "${messageText}"`);
             console.log(`   ID:        ${messageId}`);
             console.log(`   Status:    ${isDelivered ? '✅ Delivered' : '⏳ Undelivered (will deliver when peer connects)'}`);
-            console.log(`\n   Track it:  pollen status ${messageId}\n`);
+            console.log(`\n   Track it:  ib status ${messageId}\n`);
         }
     );
 }

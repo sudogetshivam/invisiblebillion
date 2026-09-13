@@ -11,13 +11,13 @@ async function scanCommand() {
 
         const peers = res.peers || [];
         if (peers.length === 0) {
-            console.log('\n🔍 No Pollen peers found on current network.\n');
-            console.log('   Peers appear automatically when other Pollen daemons');
+            console.log('\n🔍 No IB peers found on current network.\n');
+            console.log('   Peers appear automatically when other IB daemons');
             console.log('   start broadcasting on the same WiFi/LAN.\n');
             return;
         }
 
-        console.log(`\n🌿 Pollen peers on this network:\n`);
+        console.log(`\n🌍 IB peers on this network:\n`);
         console.log('  Identity           IP Address        Last Seen     Status');
         console.log('  ─────────────────  ────────────────  ────────────  ──────');
         for (const peer of peers) {
@@ -32,7 +32,7 @@ async function scanCommand() {
 
 function isOnline(epochMs) {
     if (!epochMs) return false;
-    return (Date.now() - epochMs) < 90_000; // 90 s (6 heartbeats at 15s)
+    return (Date.now() - epochMs) < 45_000; // 45 s — 3 missed heartbeats (heartbeat = 15s)
 }
 
 function formatAgo(epochMs) {

@@ -3,9 +3,9 @@
 const path = require('path'); //help safely create path files
 const fs = require('fs'); //help read and write files, also check if file exists
 const Database = require('better-sqlite3'); //importing SQLite from better-sqlite3
-const { POLLEN_DIR } = require('../identity/index'); //main folder file path
+const { IB_DIR } = require('../identity/index'); //main folder file path
 
-const DB_PATH = path.join(POLLEN_DIR, 'pollen.db');
+const DB_PATH = path.join(IB_DIR, 'ib.db');
 
 let _db = null; //stores database connection, so we dont need to open the database multiple times, 
 
@@ -13,12 +13,12 @@ let _db = null; //stores database connection, so we dont need to open the databa
 function openDb() {
   if (_db) return _db;
 
-  if (!fs.existsSync(POLLEN_DIR)) {
-    fs.mkdirSync(POLLEN_DIR, { recursive: true });
+  if (!fs.existsSync(IB_DIR)) {
+    fs.mkdirSync(IB_DIR, { recursive: true });
   }
 
-  _db = new Database(DB_PATH); //if file exists, open pollen.db
-  //else create pollen.db
+  _db = new Database(DB_PATH); //if file exists, open ib.db
+  //else create ib.db
 
   // Enable WAL mode for better concurrent read performance
   _db.pragma('journal_mode = WAL');
@@ -52,12 +52,12 @@ function openDb() {
   try {
     _db.exec(`ALTER TABLE peers ADD COLUMN ip TEXT`);
   } catch (_) {
-     // column already exists, leave it
-     //for safety purpose
+    // column already exists — ignore safely
+  }
 
   return _db;
 }
-}
+
 
 /**
  * Close the database connection.

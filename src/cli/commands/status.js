@@ -4,7 +4,7 @@ const { runCommand } = require('../ipc');
 
 async function statusCommand(messageId) {
     if (!messageId) {
-        console.error('Usage: pollen status <messageId>');
+        console.error('Usage: ib status <messageId>');
         process.exit(1);
     }
 
