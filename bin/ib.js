@@ -15,6 +15,7 @@ const { sendCommand } = require('../src/cli/commands/send');
 const { statusCommand } = require('../src/cli/commands/status');
 const { syncCommand } = require('../src/cli/commands/sync');
 const { fileCommand } = require('../src/cli/commands/file');
+const { inboxCommand } = require('../src/cli/commands/inbox');
 
 const VERSION = require('../package.json').version;
 
@@ -67,6 +68,13 @@ program
     .description('Manually trigger epidemic sync with peers on current network')
     .action(async () => {
         await syncCommand();
+    });
+
+program
+    .command('inbox')
+    .description('View all received and decrypted messages')
+    .action(async () => {
+        await inboxCommand();
     });
 
 program

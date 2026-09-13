@@ -33,6 +33,7 @@ console.error = log;
 console.warn = log;
 
 //  Imports 
+const PKG_VERSION = require('../../package.json').version;
 const { loadIdentity } = require('../identity/index');
 const { loadOrCreateKeypair } = require('../crypto/keys');
 const { encrypt, decrypt } = require('../crypto/encrypt');
@@ -59,6 +60,7 @@ const { startNetworkWatcher } = require('./network');
 const { startUDP, broadcastNow, broadcastGoodbye, sendDirectMessage } = require('./udp');
 const { startTCP, sendMessage } = require('./tcp');
 const { forwardMessages, sendAck } = require('./epidemic');
+const { AdaptiveRoutingEngine } = require('../routing/engine');
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const PID_FILE = path.join(IB_DIR, 'daemon.pid');
@@ -89,6 +91,12 @@ openDb();
 cleanExpired();
 log('Initial cleanup done.');
 setInterval(cleanExpired, 60 * 60 * 1000).unref();
+
+// ── Instantiate the Adaptive Routing Engine ───────────────────────────────────
+// The engine maintains per-peer delivery predictability scores (PRoPHET-based)
+// and gates forwarding decisions: only relay to peers that are better carriers.
+const routingEngine = new AdaptiveRoutingEngine(identity);
+log(`[routing] AdaptiveRoutingEngine initialised for ${identity}`);
 
 // ── Clear stale peer IPs from previous session ───────────────────────────────
 // Peers will re-announce via UDP within seconds if they are online
@@ -132,12 +140,12 @@ function handleIncomingMessage(message, remoteIP, isRelay = false) {
             // Continue the epidemic: immediately forward this new message to all OTHER known peers
             // This ensures the virus keeps spreading as soon as we receive it
             if (result === 'inserted') {
-                const peerIPs = getActivePeers()
-                    .map(p => p.ip)
-                    .filter(ip => ip && ip !== remoteIP); // Don't send back to source
-                if (peerIPs.length > 0) {
-                    log(`[epidemic] Spreading relay msg ${message.id} to ${peerIPs.length} other peer(s)`);
-                    forwardMessages(peerIPs).catch(err => {
+                const spreadPeers = getActivePeers()
+                    .filter(p => p.ip && p.ip !== remoteIP)
+                    .map(p => ({ identity: p.identity, ip: p.ip }));
+                if (spreadPeers.length > 0) {
+                    log(`[epidemic] Spreading relay msg ${message.id} to ${spreadPeers.length} other peer(s)`);
+                    forwardMessages(spreadPeers, routingEngine).catch(err => {
                         log(`[epidemic] Relay spread failed: ${err.message}`);
                     });
                 }
@@ -320,9 +328,21 @@ const stopUDP = startUDP({
         upsertPeer(peerIdentity, peerPublicKey, ip);
         log(`[udp] Peer discovered: ${peerIdentity} at ${ip}`);
 
-        // Phase 3: when a peer appears, deliver ALL queued messages for them
-        // Including messages stored with __pending_encryption — attemptDelivery
-        // will re-encrypt them now that we have the peer's public key.
+        // ── PRoPHET: record direct encounter ─────────────────────────────────
+        // Increases P(us, peerIdentity) and updates avg inter-contact time.
+        routingEngine.recordEncounter(peerIdentity);
+        log(`[routing] Recorded encounter with ${peerIdentity} | score=${routingEngine.getMyScoreFor(peerIdentity).toFixed(3)}`);
+
+        // ── PRoPHET: exchange routing tables ─────────────────────────────────
+        // Send our routing table so the peer can run updateTransitivity on their end.
+        // Their table arrives back via the rt-exchange TCP frame → onRoutingTable.
+        const myTable = routingEngine.getMyRoutingTable();
+        if (myTable.length > 0) {
+            sendMessage(ip, 'rt-exchange', { fromIdentity: identity, table: myTable })
+                .catch(err => log(`[routing] RT exchange to ${peerIdentity} failed: ${err.message}`));
+        }
+
+        // ── Deliver any messages queued specifically for this peer ────────────
         const pending = getMessagesForDestination(peerIdentity);
         if (pending.length > 0) {
             log(`[dtn] Peer ${peerIdentity} online — attempting ${pending.length} pending message(s)`);
@@ -333,9 +353,9 @@ const stopUDP = startUDP({
             }
         }
 
-        // Phase 4: trigger epidemic bundle exchange with this new peer
-        // We push all our pending messages (for anyone) to them so they can spread it
-        forwardMessages([ip]).catch(err => {
+        // ── PRoPHET epidemic: forward bundle to this peer ─────────────────────
+        // Pass peer object with identity so the engine can gate per-message.
+        forwardMessages([{ identity: peerIdentity, ip }], routingEngine).catch(err => {
             log(`[epidemic] Failed to forward bundle to ${ip}: ${err.message}`);
         });
     },
@@ -350,23 +370,29 @@ const stopTCP = startTCP({
     identity,
     privateKey,
     onMessage: handleIncomingMessage,
+    // ── PRoPHET: routing table exchange ──────────────────────────────────────
+    // Called when a peer sends us their routing table via the rt-exchange frame.
+    // updateTransitivity runs inside a db.transaction() so it's always atomic.
+    onRoutingTable: (fromIdentity, table) => {
+        log(`[routing] Received routing table from ${fromIdentity} (${table.length} entries)`);
+        routingEngine.updateTransitivity(fromIdentity, table);
+        log(`[routing] Transitivity updated from ${fromIdentity}`);
+    },
 });
 
-// ── Network change watcher ────────────────────────────────────────────────────
 const stopNetworkWatcher = startNetworkWatcher((newIP, previousIP) => {
-    log(`[network] Changed: ${previousIP} → ${newIP}. Clearing stale peer IPs and re-announcing...`);
+    log(`[network] Changed: ${previousIP || 'offline'} → ${newIP || 'offline'}. Clearing stale peer IPs and re-announcing...`);
 
-    // Critical: clear all peer IPs from the OLD network.
-    // Peers from the previous network are unreachable now.
-    // They will re-announce via UDP within 15s if they are also on the new network.
     clearAllPeerIPs();
     log('[network] Stale peer IPs cleared — waiting for fresh UDP announcements on new network.');
 
-    // Re-announce ourselves on the new network immediately
+    // Burst announce so peers immediately discover us on the new network
     broadcastNow();
+    setTimeout(broadcastNow, 1000).unref();
+    setTimeout(broadcastNow, 2500).unref();
 
-    // Retry delivery sweep — any peers that re-appear will be handled by onPeer callback
-    startupDeliverySweep();
+    // Schedule delivery sweep after announcements have been received and IPs refreshed
+    setTimeout(startupDeliverySweep, 2000).unref();
 });
 
 // ── Phase 3: Startup / network-change delivery sweep ─────────────────────────
@@ -452,20 +478,17 @@ setInterval(() => {
 }, STALE_PEER_INTERVAL_MS).unref();
 
 // ── Periodic epidemic forwarding sweep ────────────────────────────────────────
-// Every 45 s, push ALL pending messages to ALL currently active peers.
-// This catches the case where a carrier was already on the network when a
-// new message arrived and their onPeer event already fired — they wouldn't
-// get the new message unless we periodically push to them.
 const EPIDEMIC_SWEEP_INTERVAL_MS = 45_000;
 setInterval(() => {
     const pending = getAllPending();
     if (pending.length === 0) return;
 
-    const peerIPs = getActivePeers().map(p => p.ip).filter(ip => ip);
-    if (peerIPs.length === 0) return;
+    const activePeers = getActivePeers().filter(p => p.ip);
+    if (activePeers.length === 0) return;
 
-    log(`[epidemic] Periodic sweep: pushing ${pending.length} pending msg(s) to ${peerIPs.length} active peer(s)`);
-    forwardMessages(peerIPs).catch(err => {
+    const peerList = activePeers.map(p => ({ identity: p.identity, ip: p.ip }));
+    log(`[epidemic] Periodic sweep: pushing ${pending.length} pending msg(s) to ${peerList.length} active peer(s)`);
+    forwardMessages(peerList, routingEngine).catch(err => {
         log(`[epidemic] Periodic sweep failed: ${err.message}`);
     });
 }, EPIDEMIC_SWEEP_INTERVAL_MS).unref();
@@ -515,7 +538,7 @@ function handleCommand(cmd, socket) {
     switch (cmd.type) {
 
         case 'ping':
-            sendResponse(socket, { ok: true, identity, version: '1.0.0' });
+            sendResponse(socket, { ok: true, identity, version: PKG_VERSION });
             break;
 
         case 'stop':
@@ -528,6 +551,16 @@ function handleCommand(cmd, socket) {
             const SCAN_FRESHNESS_MS = 90_000;
             const peers = getAllPeers(SCAN_FRESHNESS_MS);
             sendResponse(socket, { ok: true, peers });
+            break;
+        }
+
+        case 'inbox': {
+            const inboxFile = path.join(IB_DIR, 'inbox.log');
+            let content = '';
+            if (fs.existsSync(inboxFile)) {
+                content = fs.readFileSync(inboxFile, 'utf8');
+            }
+            sendResponse(socket, { ok: true, content });
             break;
         }
 
@@ -592,12 +625,12 @@ function handleCommand(cmd, socket) {
                 });
 
             // ── BUG 1 FIX: Epidemic spread — push this new message to ALL known peers ──
-            // This is the core of epidemic routing: every peer on your current network
-            // gets a copy so they can carry it to other networks.
-            const activePeerIPs = getActivePeers().map(p => p.ip).filter(ip => ip);
-            if (activePeerIPs.length > 0) {
-                log(`[epidemic] Spreading new message ${id} to ${activePeerIPs.length} peer(s) on this network`);
-                forwardMessages(activePeerIPs).catch(err => {
+            // Pass peer objects so the engine can gate forwarding per-message.
+            const activePeers = getActivePeers().filter(p => p.ip);
+            if (activePeers.length > 0) {
+                const peerList = activePeers.map(p => ({ identity: p.identity, ip: p.ip }));
+                log(`[epidemic] Spreading new message ${id} to ${peerList.length} peer(s) on this network`);
+                forwardMessages(peerList, routingEngine).catch(err => {
                     log(`[epidemic] Failed epidemic spread for ${id}: ${err.message}`);
                 });
             }
@@ -642,9 +675,9 @@ function handleCommand(cmd, socket) {
             startupDeliverySweep();
 
             // Also trigger epidemic forwarding to all active peers
-            const syncPeerIPs = activePeers.map(p => p.ip).filter(ip => ip);
-            if (syncPeerIPs.length > 0) {
-                forwardMessages(syncPeerIPs).catch(err => {
+            const syncPeers = activePeers.filter(p => p.ip).map(p => ({ identity: p.identity, ip: p.ip }));
+            if (syncPeers.length > 0) {
+                forwardMessages(syncPeers, routingEngine).catch(err => {
                     log(`[epidemic] Sync forward failed: ${err.message}`);
                 });
             }

@@ -28,28 +28,34 @@ let _myIdentity = null; //our identity string e.g. shivam@a3f2, included in broa
 let _myPublicKey = null; //our RSA public key PEM, included in broadcasts so peers can encrypt messages to us for direct UDP delivery when TCP is blocked
 
 
+const { getActiveIPv4Interfaces } = require('./network');
+
 function computeBroadcast(ip, netmask) {
-    const ipParts = ip.split('.').map(Number);
-    const maskParts = netmask.split('.').map(Number);
-    const broadcast = ipParts.map((b, i) => (b | (~maskParts[i] & 0xff))); //xor of ip and subnet mask
-    return broadcast.join('.');
+    try {
+        const ipParts = ip.split('.').map(Number);
+        const maskParts = netmask.split('.').map(Number);
+        const broadcast = ipParts.map((b, i) => (b | (~maskParts[i] & 0xff)));
+        return broadcast.join('.');
+    } catch {
+        return '255.255.255.255';
+    }
 }
 
 /**
- * Get all LAN broadcast addresses for every non-loopback IPv4 interface.
- * Falls back to ['255.255.255.255'] if none found.
+ * Get all LAN broadcast addresses for active IPv4 interfaces.
+ * Always includes 255.255.255.255 to support mobile hotspots.
  */
 function getBroadcastAddresses() {
-    const addrs = [];
-    const ifaces = os.networkInterfaces();
-    for (const ifaceList of Object.values(ifaces)) {
-        for (const iface of ifaceList) {
-            if (iface.family === 'IPv4' && !iface.internal && iface.netmask) {
-                addrs.push(computeBroadcast(iface.address, iface.netmask));
-            }
+    const addrs = new Set();
+    const active = getActiveIPv4Interfaces();
+    for (const iface of active) {
+        if (iface.address && iface.netmask) {
+            addrs.add(computeBroadcast(iface.address, iface.netmask));
         }
     }
-    return addrs.length > 0 ? addrs : ['255.255.255.255'];
+    // Always include limited broadcast 255.255.255.255 (vital for Android/iOS hotspots)
+    addrs.add('255.255.255.255');
+    return Array.from(addrs);
 }
 
 /**

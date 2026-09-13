@@ -1,84 +1,88 @@
 'use strict';
 
-const os = require('os');//it provides information about system
+const os = require('os');
 
-//returns current machine ipv4 address if not present in network returns null
-function getCurrentIP() {
-    const ifaces = os.networkInterfaces(); // our machine has different network interfaces like wlan,eth,virtualbox net
-    //this networkInterfaces function gives all netowrk interface and their addresses
-
-    //something like this
-
-    /**
-     * {
-  lo: [
-    { address: "127.0.0.1", family: "IPv4", internal: true }
-  ],
-  eth0: [
-    { address: "192.168.1.12", family: "IPv4", internal: false }
-  ],
-  wlan0: [
-    { address: "192.168.1.15", family: "IPv4", internal: false }
-  ]
-}
-     */
-    for (const name of Object.keys(ifaces)) {
-        for (const iface of ifaces[name]) {
-            if (iface.family === 'IPv4' && !iface.internal) {
-                //as we know eth0 and wlan0 are external so we have to make this condition true
-                //also lo(localhost) we cant take this, because own cannot connect with own
-                return iface.address;
-            }
-        }
-    }
-    return null;
+/**
+ * Check if a network interface is a virtual adapter (VMware, WSL, VirtualBox, etc.)
+ * These adapters have static host IPs and do not change when physical Wi-Fi changes.
+ */
+function isVirtualAdapter(name) {
+    return /vmware|virtualbox|vbox|vethernet|wsl|hyper-v|loopback|tap|npcap|tailscale|docker/i.test(name);
 }
 
 /**
- * Start polling for network changes every 30 seconds.
- * Returns a function that stops the watcher when called.
+ * Returns all active non-internal IPv4 interfaces.
+ * Prioritises physical interfaces (Wi-Fi, Ethernet) over virtual adapters.
  */
+function getActiveIPv4Interfaces() {
+    const ifaces = os.networkInterfaces();
+    const physical = [];
+    const virtual = [];
 
-// The function does not define onChangeCallback itself.
-//It expects the caller to pass a function when calling startNetworkWatcher
-function startNetworkWatcher(onChangeCallback) {
-    let currentIP = getCurrentIP();
-    console.log(`[network] Current IP: ${currentIP || 'none'}`);
+    for (const [name, list] of Object.entries(ifaces)) {
+        if (!list) continue;
+        const isVirt = isVirtualAdapter(name);
+        for (const iface of list) {
+            if (iface.family === 'IPv4' && !iface.internal && iface.address) {
+                const item = { name, address: iface.address, netmask: iface.netmask };
+                if (isVirt) {
+                    virtual.push(item);
+                } else {
+                    physical.push(item);
+                }
+            }
+        }
+    }
 
-    const interval = setInterval(() => {
-        const newIP = getCurrentIP();
-        if (newIP !== currentIP) {
-            const previousIP = currentIP;
-            currentIP = newIP;
-            console.log(`[network] Network change detected: ${previousIP} → ${newIP}`);
-            try {
-                /**
-                 * Function that accepts a callback
-    function greet(callback) {
-            console.log("Hello");
-                callback();
+    return physical.length > 0 ? physical : virtual;
 }
 
-Now call it:
+/**
+ * Returns current machine primary IPv4 address, or null if offline.
+ * Favours physical Wi-Fi/Ethernet adapters over virtual host-only networks.
+ */
+function getCurrentIP() {
+    const active = getActiveIPv4Interfaces();
+    return active.length > 0 ? active[0].address : null;
+}
 
-greet(() => {
-    console.log("Callback executed");
-});
+/**
+ * Get a unique fingerprint of all active IPv4 interfaces.
+ * Used to detect network changes even if only subnet or secondary adapter changes.
+ */
+function getNetworkFingerprint() {
+    const active = getActiveIPv4Interfaces();
+    return active.map(i => `${i.name}:${i.address}`).sort().join(';');
+}
 
-Output:
+/**
+ * Start polling for network changes every 4 seconds.
+ * Triggers onChangeCallback when physical IP or active adapter changes.
+ * Returns a function that stops the watcher when called.
+ */
+function startNetworkWatcher(onChangeCallback) {
+    let currentIP = getCurrentIP();
+    let currentFingerprint = getNetworkFingerprint();
+    console.log(`[network] Current IP: ${currentIP || 'none'} (fingerprint: ${currentFingerprint || 'offline'})`);
 
-Hello
-Callback executed
-                 */
+    const interval = setInterval(() => {
+        const newFingerprint = getNetworkFingerprint();
+        if (newFingerprint !== currentFingerprint) {
+            const previousIP = currentIP;
+            const newIP = getCurrentIP();
+            currentFingerprint = newFingerprint;
+            currentIP = newIP;
+
+            console.log(`[network] Network change detected: ${previousIP || 'none'} → ${newIP || 'none'}`);
+            try {
                 onChangeCallback(newIP, previousIP);
             } catch (err) {
                 console.error('[network] onChangeCallback error:', err.message);
             }
         }
-    }, 15_000);
+    }, 4_000);
 
-    // Return a stop function
     return () => clearInterval(interval);
 }
 
-module.exports = { getCurrentIP, startNetworkWatcher };
+module.exports = { getCurrentIP, getActiveIPv4Interfaces, startNetworkWatcher };
