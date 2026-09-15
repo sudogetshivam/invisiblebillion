@@ -99,12 +99,23 @@ async function sendCommand_(destination, messageText) {
                 return;
             }
 
-            const isDelivered = res.status === 'delivered';
+            const isDelivered       = res.status === 'delivered';
+            const isPendingKeyExch  = res.status === 'pending_encryption';
+
             console.log(`\n📤 Message ${isDelivered ? 'delivered!' : 'queued!'}`);
             console.log(`   To:        ${destination}`);
             console.log(`   Message:   "${messageText}"`);
             console.log(`   ID:        ${messageId}`);
-            console.log(`   Status:    ${isDelivered ? '✅ Delivered' : '⏳ Undelivered (will deliver when peer connects)'}`);
+            if (isDelivered) {
+                console.log(`   Status:    ✅ Delivered`);
+            } else if (isPendingKeyExch) {
+                console.log(`   Status:    🔍 Key discovery in progress`);
+                console.log(`              Message is stored securely on your device.`);
+                console.log(`              It will be encrypted & sent automatically once`);
+                console.log(`              ${destination}'s public key is discovered.`);
+            } else {
+                console.log(`   Status:    ⏳ Queued — will deliver when peer connects`);
+            }
             console.log(`\n   Track it:  ib status ${messageId}\n`);
         }
     );

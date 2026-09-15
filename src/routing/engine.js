@@ -394,25 +394,42 @@ class AdaptiveRoutingEngine {
     }
 
     /**
-     * Forwarding gatekeeper — decide whether to hand a message to a candidate relay.
+     * Forwarding gatekeeper — Hybrid Routing Decision.
      *
-     * DTN Forwarding Rules:
-     *   1. Candidate IS the destination -> ALWAYS true (direct delivery).
-     *   2. Candidate IS ourselves OR target IS ourselves -> ALWAYS false (no self-loops).
-     *   3. Candidate has strictly higher predictability -> true (PRoPHET advantage).
-     *   4. Cold-start (we have zero history with target, ourScore === 0) -> true
-     *      (in DTN, when a node has no route, exploratory replication to encountered
-     *       peers is required to start propagation across disconnected networks).
-     *   5. Target is not currently reachable directly, and candidate has non-zero history -> true.
-     *   6. Epidemic multi-hop fallback (hop_count < 10) -> true.
+     * ┌─────────────────────────────────────────────────────────────┐
+     * │  Plane          │ Packet type              │ Decision         │
+     * ├─────────────────┼──────────────────────────┼──────────────────┤
+     * │ Control Plane   │ key_req / key_res         │ ALWAYS forward   │
+     * │                 │ (flooding, no engine)     │ (max latency)    │
+     * ├─────────────────┼──────────────────────────┼──────────────────┤
+     * │ Blocked         │ __pending_encryption      │ NEVER forward    │
+     * │                 │ (plaintext payload)       │ (privacy lock)   │
+     * ├─────────────────┼──────────────────────────┼──────────────────┤
+     * │ Data Plane      │ encrypted payload         │ PRoPHET engine   │
+     * │                 │ (status = undelivered)    │ (max efficiency) │
+     * └─────────────────┴──────────────────────────┴──────────────────┘
      *
      * @param {string} targetId          Message destination identity.
      * @param {string} candidateRelayId  Peer being evaluated as a relay.
-     * @param {object} [messageMetadata] Hop count, ttl, etc.
+     * @param {object} [messageMetadata] { hop_count, ttl, type, status }
      * @returns {boolean}
      */
     shouldForwardMessage(targetId, candidateRelayId, messageMetadata = {}) {
         if (!targetId || !candidateRelayId) return false;
+
+        // ── Control Plane: key_req / key_res bypass the engine entirely ──────
+        // These are tiny control packets for public key discovery.
+        // We flood them aggressively to minimise latency.
+        const msgType = messageMetadata.type;
+        if (msgType === 'key_req' || msgType === 'key_res') return true;
+
+        // ── Privacy Lock: NEVER forward plaintext payloads ───────────────────
+        // Messages in __pending_encryption state contain the user's plaintext.
+        // They must NEVER leave the originating device until a key_res arrives
+        // and they are properly encrypted.
+        if (messageMetadata.status === '__pending_encryption') return false;
+
+        // ── Data Plane: below this line = fully encrypted payload ────────────
 
         // Candidate IS the destination — always forward (direct delivery)
         if (candidateRelayId === targetId) return true;
@@ -429,16 +446,14 @@ class AdaptiveRoutingEngine {
         // Rule 1: Candidate has a meaningful advantage over us
         if (candidateScore > ourScore + FORWARD_THRESHOLD) return true;
 
-        // Rule 2: Cold-start — we have no history/route for this destination (ourScore === 0)
-        // Hand off to candidate so the message can begin exploring the network
+        // Rule 2: Cold-start — we have no history/route for this destination
         if (ourScore <= 0.0) return true;
 
-        // Rule 3: Candidate has direct/transitive knowledge of target (> 0)
+        // Rule 3: Candidate has direct/transitive knowledge of target
         if (candidateScore > 0.0) return true;
 
-        // Rule 4: DTN Epidemic carrier fallback — allow store-and-forward for messages
-        // still within hop limit (< 10 hops) when we cannot reach destination directly
-        const hops = messageMetadata && messageMetadata.hop_count !== undefined ? messageMetadata.hop_count : 0;
+        // Rule 4: DTN Epidemic carrier fallback — within hop limit
+        const hops = messageMetadata.hop_count !== undefined ? messageMetadata.hop_count : 0;
         if (hops < 10) return true;
 
         return false;

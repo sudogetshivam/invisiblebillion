@@ -7,20 +7,24 @@ const TCP_PORT = 41235;
 const CONNECT_TIMEOUT_MS = 2000; //wait 2second for peers to respond to TCP connection attempts
 const SEND_TIMEOUT_MS = 8000;   
 
-let _server     = null;
-let _identity   = null;
-let _privateKey = null;
-let _onMessage  = null;
+let _server         = null;
+let _identity       = null;
+let _privateKey     = null;
+let _onMessage      = null;
 let _onRoutingTable = null; // callback(fromIdentity, table) for routing-table exchange
+let _onKeyRequest   = null; // callback(packet, remoteIP) for key_req control packets
+let _onKeyResponse  = null; // callback(packet, remoteIP) for key_res control packets
 
 
-function startTCP({ identity, privateKey, onMessage, onRoutingTable }) {
+function startTCP({ identity, privateKey, onMessage, onRoutingTable, onKeyRequest, onKeyResponse }) {
     if (_server) return () => stopTCP();
 
     _identity       = identity;
     _privateKey     = privateKey;
     _onMessage      = onMessage;
     _onRoutingTable = onRoutingTable || null;
+    _onKeyRequest   = onKeyRequest   || null;
+    _onKeyResponse  = onKeyResponse  || null;
 
     _server = net.createServer((socket) => {
         handleIncomingConnection(socket); //creates tcp server and listens for incoming connections, this function will read message frame, parse JSON, process message
@@ -121,6 +125,26 @@ function processFrame(frame, socket, remoteIP) {
             }
         } else {
             socket.write(JSON.stringify({ type: 'ack', ok: false, error: 'Malformed rt-exchange frame' }) + '\n');
+        }
+    } else if (type === 'key_req') {
+        // Control plane: key discovery request — flood to find a peer's public key.
+        console.log(`[tcp] Control key_req for ${message.destination || '?'} from ${remoteIP}`);
+        try {
+            if (_onKeyRequest) _onKeyRequest(message, remoteIP);
+            socket.write(JSON.stringify({ type: 'ack', ok: true }) + '\n');
+        } catch (err) {
+            console.error('[tcp] onKeyRequest handler error:', err.message);
+            socket.write(JSON.stringify({ type: 'ack', ok: false, error: err.message }) + '\n');
+        }
+    } else if (type === 'key_res') {
+        // Control plane: key discovery response — peer has sent back a public key.
+        console.log(`[tcp] Control key_res for ${message.destination || '?'} from ${remoteIP}`);
+        try {
+            if (_onKeyResponse) _onKeyResponse(message, remoteIP);
+            socket.write(JSON.stringify({ type: 'ack', ok: true }) + '\n');
+        } catch (err) {
+            console.error('[tcp] onKeyResponse handler error:', err.message);
+            socket.write(JSON.stringify({ type: 'ack', ok: false, error: err.message }) + '\n');
         }
     } else {
         socket.write(JSON.stringify({ type: 'ack', ok: false, error: `Unknown frame type: ${type}` }) + '\n');

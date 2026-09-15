@@ -35,8 +35,9 @@ function getMessageById(id) {
 }
 
 /**
- * Retrieve all messages that are undelivered or intransit.
- * Used for epidemic forwarding.
+ * Retrieve all messages that are ready for epidemic forwarding.
+ * Explicitly EXCLUDES '__pending_encryption' — those messages contain
+ * plaintext and must NEVER leave the device until a key_res arrives.
  */
 function getAllPending() {
     const db = openDb();
@@ -45,7 +46,48 @@ function getAllPending() {
     WHERE status IN ('undelivered', 'intransit')
     AND hop_count < 20
     AND ttl > ?
-  `).all(Date.now()); //same here, idhar bhi run use nahi kiya??
+  `).all(Date.now());
+}
+
+/**
+ * Retrieve all messages stored with __pending_encryption status
+ * for a specific destination identity.
+ * Called when a key_res packet arrives so we can encrypt and re-queue them.
+ *
+ * @param {string} destination - Peer identity whose key we just received
+ * @returns {Array} Array of message rows
+ */
+function getPendingEncryptionMessages(destination) {
+    const db = openDb();
+    return db.prepare(`
+        SELECT * FROM messages
+        WHERE destination = ?
+          AND status = '__pending_encryption'
+          AND ttl > ?
+    `).all(destination, Date.now());
+}
+
+/**
+ * Bulk-encrypt pending messages once a peer's public key is resolved.
+ * Each message's payload is replaced with the encrypted blob and
+ * status is promoted to 'undelivered' so it enters the data plane.
+ *
+ * All writes run in a single transaction for atomicity.
+ *
+ * @param {Array<{id: string, encryptedPayload: string}>} updates
+ */
+function bulkEncryptPending(updates) {
+    if (!updates || updates.length === 0) return;
+    const db = openDb();
+    const stmt = db.prepare(
+        `UPDATE messages SET payload = ?, status = 'undelivered' WHERE id = ?`
+    );
+    const runAll = db.transaction((rows) => {
+        for (const { id, encryptedPayload } of rows) {
+            stmt.run(encryptedPayload, id);
+        }
+    });
+    runAll(updates);
 }
 
  //update status to delivered
@@ -206,6 +248,8 @@ module.exports = {
     insertMessage,
     getMessageById,
     getAllPending,
+    getPendingEncryptionMessages,
+    bulkEncryptPending,
     markDelivered,
     markInTransit,
     incrementHop,

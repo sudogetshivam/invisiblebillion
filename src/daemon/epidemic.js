@@ -48,11 +48,16 @@ function forwardMessages(peers, engine = null) {
             }
 
             // ── Engine-gated forwarding decision ──────────────────────────────
-            // If we have an engine and a peer identity, evaluate carrier suitability.
+            // Pass type + status so the engine can:
+            //   • bypass engine for control packets (key_req / key_res)
+            //   • hard-block __pending_encryption payloads (plaintext guard)
+            //   • apply PRoPHET math for encrypted data payloads
             if (engine && peer.identity) {
                 const shouldRelay = engine.shouldForwardMessage(msg.destination, peer.identity, {
                     hop_count: msg.hop_count,
-                    ttl: msg.ttl,
+                    ttl:       msg.ttl,
+                    type:      msg.type   || 'payload',
+                    status:    msg.status || 'undelivered',
                 });
                 if (!shouldRelay) {
                     log(`[epidemic] Skipping ${msg.id} → ${peer.identity} (not an eligible carrier)`);
