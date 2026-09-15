@@ -55,12 +55,19 @@ const {
     markPeerOffline,
     clearAllPeerIPs,
     removeInactivePeers,
+    getPendingEncryptionMessages,
+    bulkEncryptPending,
 } = require('../db/messages');
 const { startNetworkWatcher } = require('./network');
 const { startUDP, broadcastNow, broadcastGoodbye, sendDirectMessage } = require('./udp');
 const { startTCP, sendMessage } = require('./tcp');
 const { forwardMessages, sendAck } = require('./epidemic');
 const { AdaptiveRoutingEngine } = require('../routing/engine');
+const {
+    floodKeyRequest,
+    handleKeyRequest,
+    handleKeyResponse,
+} = require('./keyDiscovery');
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const PID_FILE = path.join(IB_DIR, 'daemon.pid');
@@ -329,17 +336,50 @@ const stopUDP = startUDP({
         log(`[udp] Peer discovered: ${peerIdentity} at ${ip}`);
 
         // ── PRoPHET: record direct encounter ─────────────────────────────────
-        // Increases P(us, peerIdentity) and updates avg inter-contact time.
         routingEngine.recordEncounter(peerIdentity);
         log(`[routing] Recorded encounter with ${peerIdentity} | score=${routingEngine.getMyScoreFor(peerIdentity).toFixed(3)}`);
 
         // ── PRoPHET: exchange routing tables ─────────────────────────────────
-        // Send our routing table so the peer can run updateTransitivity on their end.
-        // Their table arrives back via the rt-exchange TCP frame → onRoutingTable.
         const myTable = routingEngine.getMyRoutingTable();
         if (myTable.length > 0) {
             sendMessage(ip, 'rt-exchange', { fromIdentity: identity, table: myTable })
                 .catch(err => log(`[routing] RT exchange to ${peerIdentity} failed: ${err.message}`));
+        }
+
+        // ── Key Discovery: if we have __pending_encryption messages for this
+        // peer but still don't have their public key, flood a key_req now.
+        // (UDP announce already gives us their key if they are broadcasting,
+        //  but if they are only reachable via relays this path handles it.)
+        if (!getPeerPublicKey(peerIdentity)) {
+            const pendingForPeer = getPendingEncryptionMessages(peerIdentity);
+            if (pendingForPeer.length > 0) {
+                log(`[key-discovery] ${peerIdentity} online but key unknown — flooding key_req`);
+                floodKeyRequest(peerIdentity, identity, [{ identity: peerIdentity, ip }]);
+            }
+        } else {
+            // We DO have the key: check if there are pending-encryption messages
+            // that were stored before we discovered their key. This handles the
+            // race where the user sent a message while the peer was offline.
+            const pendingForPeer = getPendingEncryptionMessages(peerIdentity);
+            if (pendingForPeer.length > 0) {
+                log(`[key-discovery] ${peerIdentity} has key already — encrypting ${pendingForPeer.length} pending msg(s) immediately`);
+                const { encrypt: encryptFn } = require('../crypto/encrypt');
+                const peerKey = getPeerPublicKey(peerIdentity);
+                const updates = [];
+                for (const msg of pendingForPeer) {
+                    try {
+                        const payloadObj = JSON.parse(msg.payload);
+                        const plaintext = payloadObj.__phase1_plaintext || '';
+                        if (plaintext) {
+                            const blob = encryptFn(plaintext, peerKey);
+                            updates.push({ id: msg.id, encryptedPayload: JSON.stringify(blob) });
+                        }
+                    } catch (e) {
+                        log(`[key-discovery] Encrypt pending msg ${msg.id} failed: ${e.message}`);
+                    }
+                }
+                if (updates.length > 0) bulkEncryptPending(updates);
+            }
         }
 
         // ── Deliver any messages queued specifically for this peer ────────────
@@ -354,7 +394,6 @@ const stopUDP = startUDP({
         }
 
         // ── PRoPHET epidemic: forward bundle to this peer ─────────────────────
-        // Pass peer object with identity so the engine can gate per-message.
         forwardMessages([{ identity: peerIdentity, ip }], routingEngine).catch(err => {
             log(`[epidemic] Failed to forward bundle to ${ip}: ${err.message}`);
         });
@@ -371,12 +410,63 @@ const stopTCP = startTCP({
     privateKey,
     onMessage: handleIncomingMessage,
     // ── PRoPHET: routing table exchange ──────────────────────────────────────
-    // Called when a peer sends us their routing table via the rt-exchange frame.
-    // updateTransitivity runs inside a db.transaction() so it's always atomic.
     onRoutingTable: (fromIdentity, table) => {
         log(`[routing] Received routing table from ${fromIdentity} (${table.length} entries)`);
         routingEngine.updateTransitivity(fromIdentity, table);
         log(`[routing] Transitivity updated from ${fromIdentity}`);
+    },
+    // ── Control Plane: key discovery ─────────────────────────────────────────
+    // Helper used by handleKeyRequest to reply inline to the requester's IP.
+    onKeyRequest: (packet, remoteIP) => {
+        log(`[key-discovery] key_req received from ${remoteIP} for target=${packet.destination}`);
+        handleKeyRequest(
+            packet,
+            remoteIP,
+            identity,
+            publicKey,
+            // sendResponse: send a key_res back to the requester's IP
+            (ip, frameType, responsePacket) => {
+                sendMessage(ip, frameType, responsePacket)
+                    .catch(() =>
+                        sendDirectMessage(ip, frameType, responsePacket).catch(() => {})
+                    );
+            }
+        );
+    },
+    onKeyResponse: (packet, remoteIP) => {
+        log(`[key-discovery] key_res received from ${remoteIP} dest=${packet.destination}`);
+        // If this key_res is addressed to us, resolve pending encrypted messages.
+        // If it's for someone else, relay it onward via flood.
+        if (packet.destination === identity) {
+            handleKeyResponse(packet, identity, (targetId, count) => {
+                log(`[key-discovery] ✅ ${count} msg(s) encrypted for ${targetId} — entering data plane`);
+                // Trigger immediate delivery attempt now that messages are encrypted
+                const ready = getMessagesForDestination(targetId);
+                for (const msg of ready) {
+                    attemptDelivery(msg).catch(err =>
+                        log(`[dtn] Post-key-discovery delivery failed for ${msg.id}: ${err.message}`)
+                    );
+                }
+                // Also epidemic-spread to active peers
+                const activePeers = getActivePeers().filter(p => p.ip);
+                if (activePeers.length > 0) {
+                    forwardMessages(
+                        activePeers.map(p => ({ identity: p.identity, ip: p.ip })),
+                        routingEngine
+                    ).catch(() => {});
+                }
+            });
+        } else {
+            // Relay the key_res further via flooding (Control Plane)
+            const otherPeers = getActivePeers()
+                .filter(p => p.ip && p.ip !== remoteIP);
+            for (const peer of otherPeers) {
+                sendMessage(peer.ip, 'key_res', packet)
+                    .catch(() =>
+                        sendDirectMessage(peer.ip, 'key_res', packet).catch(() => {})
+                    );
+            }
+        }
     },
 });
 
@@ -587,7 +677,17 @@ function handleCommand(cmd, socket) {
                 break;
             }
 
+            // Detect if this message is in __pending_encryption state
+            let isPendingEncryption = false;
+            try {
+                const p = JSON.parse(payload);
+                isPendingEncryption = !!(p.__pending_encryption);
+            } catch { /* not JSON — treat as already encrypted */ }
+
             // ── Store first, always ──────────────────────────────────────────
+            // __pending_encryption messages get a special status so the epidemic
+            // forwarder will NEVER touch them (plaintext privacy guard).
+            const storeStatus = isPendingEncryption ? '__pending_encryption' : 'undelivered';
             try {
                 insertMessage({
                     id,
@@ -595,9 +695,9 @@ function handleCommand(cmd, socket) {
                     destination,
                     payload,
                     ttl,
-                    status: 'undelivered',
+                    status: storeStatus,
                 });
-                log(`[send] Stored message ${id} → ${destination}`);
+                log(`[send] Stored message ${id} → ${destination} (status=${storeStatus})`);
             } catch (err) {
                 sendResponse(socket, { ok: false, error: `DB insert failed: ${err.message}` });
                 break;
@@ -613,7 +713,17 @@ function handleCommand(cmd, socket) {
                 }
             }
 
-            // ── Attempt live delivery asynchronously ─────────────────────────
+            if (isPendingEncryption) {
+                // ── Control Plane: flood a key_req so we can discover the key ─
+                // Do NOT forward the message itself — it's plaintext.
+                const activePeers = getActivePeers().filter(p => p.ip);
+                log(`[key-discovery] Flooding key_req for ${destination} (${activePeers.length} peer(s) reachable)`);
+                floodKeyRequest(destination, identity, activePeers);
+                sendResponse(socket, { ok: true, messageId: id, status: 'pending_encryption' });
+                break;
+            }
+
+            // ── Attempt live delivery asynchronously (fully encrypted msg) ────
             const msg = getMessageById(id);
             attemptDelivery(msg)
                 .then((delivered) => {
@@ -624,8 +734,7 @@ function handleCommand(cmd, socket) {
                     sendResponse(socket, { ok: true, messageId: id, status: 'undelivered' });
                 });
 
-            // ── BUG 1 FIX: Epidemic spread — push this new message to ALL known peers ──
-            // Pass peer objects so the engine can gate forwarding per-message.
+            // ── Epidemic spread — push this new encrypted message to ALL known peers
             const activePeers = getActivePeers().filter(p => p.ip);
             if (activePeers.length > 0) {
                 const peerList = activePeers.map(p => ({ identity: p.identity, ip: p.ip }));
